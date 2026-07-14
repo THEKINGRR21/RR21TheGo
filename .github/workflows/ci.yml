@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rr21go
+        ports:
+          - 5439:5432
+        # Set health checks to wait for postgres to be ready
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Typecheck
+        run: npx tsc --noEmit
+
+      - name: Run Lint Checks
+        run: npm run lint
+
+      - name: Run DB Migrations
+        run: npx tsx scripts/migrate.ts
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5439/rr21go
+
+      - name: Configure Row Level Security (RLS)
+        run: npx tsx scripts/setup-rls.ts
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5439/rr21go
+
+      - name: Setup DB Role for App
+        run: npx tsx scripts/setup-db-user.ts
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5439/rr21go
+
+      - name: Run Cross-Tenant Isolation Tests
+        run: npx tsx scripts/test-rls.ts
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5439/rr21go
