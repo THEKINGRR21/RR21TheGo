@@ -560,8 +560,9 @@ app.get('/api/foods/search', async (c) => {
               }
             }
           }
-        } catch (err) {
+        } catch (err: any) {
           console.error('Failed to fetch from USDA API text search:', err);
+          throw new Error(`USDA API text search failed: ${err.message}`);
         }
       }
 
@@ -655,8 +656,9 @@ app.get('/api/foods/search', async (c) => {
               }
             }
           }
-        } catch (err) {
+        } catch (err: any) {
           console.error('Failed to fetch from Open Food Facts API text search:', err);
+          throw new Error(`Open Food Facts API text search failed: ${err.message}`);
         }
       }
     } else {
