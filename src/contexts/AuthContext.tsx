@@ -1,7 +1,7 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
 import { Platform } from 'react-native';
 
-const API_BASE = 'http://localhost:3000/api';
+const API_BASE = 'https://rr21thego.onrender.com/api';
 const AUTH_KEY = 'rr21go_auth_subject';
 
 // In-memory cache for native platforms fallback
