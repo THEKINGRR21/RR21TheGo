@@ -480,84 +480,86 @@ app.get('/api/foods/search', async (c) => {
         try {
           const encodedQuery = encodeURIComponent(q);
           const resUsda = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?api_key=DEMO_KEY&query=${encodedQuery}&pageSize=10`);
-          if (resUsda.status === 200) {
-            const usdaPayload = await resUsda.json();
-            const products = usdaPayload.foods || [];
-            
-            for (const prod of products) {
-              const kcal = Number(prod.foodNutrients.find((n: any) => n.unitName === 'KCAL' || n.nutrientName.toLowerCase().includes('energy'))?.value) || 0;
-              const protein = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase() === 'protein')?.value) || 0;
-              const fat = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('lipid') || n.nutrientName.toLowerCase() === 'fat')?.value) || 0;
-              const carb = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('carbohydrate'))?.value) || 0;
-              const fiber = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('fiber') || n.nutrientName.toLowerCase().includes('fibre'))?.value) || 0;
+          if (resUsda.status !== 200) {
+            const errText = await resUsda.text();
+            throw new Error(`USDA API returned status ${resUsda.status}: ${errText}`);
+          }
+          const usdaPayload = await resUsda.json();
+          const products = usdaPayload.foods || [];
+          
+          for (const prod of products) {
+            const kcal = Number(prod.foodNutrients.find((n: any) => n.unitName === 'KCAL' || n.nutrientName.toLowerCase().includes('energy'))?.value) || 0;
+            const protein = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase() === 'protein')?.value) || 0;
+            const fat = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('lipid') || n.nutrientName.toLowerCase() === 'fat')?.value) || 0;
+            const carb = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('carbohydrate'))?.value) || 0;
+            const fiber = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('fiber') || n.nutrientName.toLowerCase().includes('fibre'))?.value) || 0;
 
-              const foodName = prod.description || 'Unknown Food';
-              const foodBrand = prod.brandName || prod.brandOwner || 'Generic';
-              const sourceIdStr = String(prod.fdcId);
+            const foodName = prod.description || 'Unknown Food';
+            const foodBrand = prod.brandName || prod.brandOwner || 'Generic';
+            const sourceIdStr = String(prod.fdcId);
 
-              // Check if it already exists locally
-              const existing = await db
-                .select()
-                .from(foods)
-                .where(and(eq(foods.source, 'usda'), eq(foods.sourceId, sourceIdStr)))
-                .limit(1);
+            // Check if it already exists locally
+            const existing = await db
+              .select()
+              .from(foods)
+              .where(and(eq(foods.source, 'usda'), eq(foods.sourceId, sourceIdStr)))
+              .limit(1);
 
-              let targetFood;
-              if (existing.length > 0) {
-                targetFood = existing[0];
-              } else {
-                const [inserted] = await db.insert(foods).values({
-                  source: 'usda',
-                  sourceId: sourceIdStr,
-                  barcode: prod.gtinUpc || null,
-                  name: foodName,
-                  brand: foodBrand,
-                  kcalPer100g: sql`${kcal}::numeric`,
-                  proteinPer100g: sql`${protein}::numeric`,
-                  fatPer100g: sql`${fat}::numeric`,
-                  carbPer100g: sql`${carb}::numeric`,
-                  fiberPer100g: sql`${fiber}::numeric`,
-                  searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
-                }).returning();
+            let targetFood;
+            if (existing.length > 0) {
+              targetFood = existing[0];
+            } else {
+              const [inserted] = await db.insert(foods).values({
+                source: 'usda',
+                sourceId: sourceIdStr,
+                barcode: prod.gtinUpc || null,
+                name: foodName,
+                brand: foodBrand,
+                kcalPer100g: sql`${kcal}::numeric`,
+                proteinPer100g: sql`${protein}::numeric`,
+                fatPer100g: sql`${fat}::numeric`,
+                carbPer100g: sql`${carb}::numeric`,
+                fiberPer100g: sql`${fiber}::numeric`,
+                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+              }).returning();
 
-                targetFood = inserted;
+              targetFood = inserted;
 
-                const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
-                const servingGrams = Number(prod.servingSize) || 0;
-                if (servingGrams > 0) {
-                  const label = prod.householdServingFullText ? `${prod.householdServingFullText} (${servingGrams}g)` : `1 serving (${servingGrams}g)`;
-                  servingsList.push({ label, grams: servingGrams, isDefault: false });
-                }
-
-                for (const s of servingsList) {
-                  await db.insert(foodServings).values({
-                    foodId: targetFood.id,
-                    label: s.label,
-                    grams: sql`${s.grams}::numeric`,
-                    isDefault: s.isDefault,
-                  }).onConflictDoNothing();
-                }
+              const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
+              const servingGrams = Number(prod.servingSize) || 0;
+              if (servingGrams > 0) {
+                const label = prod.householdServingFullText ? `${prod.householdServingFullText} (${servingGrams}g)` : `1 serving (${servingGrams}g)`;
+                servingsList.push({ label, grams: servingGrams, isDefault: false });
               }
 
-              // Only append if it's not already in the list
-              if (!foodsList.some(f => f.id === targetFood.id)) {
-                foodsList.push({
-                  id: targetFood.id,
-                  source: targetFood.source,
-                  sourceId: targetFood.sourceId,
-                  barcode: targetFood.barcode,
-                  name: targetFood.name,
-                  brand: targetFood.brand,
-                  kcalPer100g: String(kcal),
-                  proteinPer100g: String(protein),
-                  fatPer100g: String(fat),
-                  carbPer100g: String(carb),
-                  fiberPer100g: String(fiber),
-                  ownerUserId: null,
-                  log_count: 0,
-                  last_logged: '1970-01-01T00:00:00.000Z',
-                });
+              for (const s of servingsList) {
+                await db.insert(foodServings).values({
+                  foodId: targetFood.id,
+                  label: s.label,
+                  grams: sql`${s.grams}::numeric`,
+                  isDefault: s.isDefault,
+                }).onConflictDoNothing();
               }
+            }
+
+            // Only append if it's not already in the list
+            if (!foodsList.some(f => f.id === targetFood.id)) {
+              foodsList.push({
+                id: targetFood.id,
+                source: targetFood.source,
+                sourceId: targetFood.sourceId,
+                barcode: targetFood.barcode,
+                name: targetFood.name,
+                brand: targetFood.brand,
+                kcalPer100g: String(kcal),
+                proteinPer100g: String(protein),
+                fatPer100g: String(fat),
+                carbPer100g: String(carb),
+                fiberPer100g: String(fiber),
+                ownerUserId: null,
+                log_count: 0,
+                last_logged: '1970-01-01T00:00:00.000Z',
+              });
             }
           }
         } catch (err: any) {
@@ -576,84 +578,86 @@ app.get('/api/foods/search', async (c) => {
               'User-Agent': 'GoTracker/1.0 (rishiraman212005@gmail.com)'
             }
           });
-          if (resOff.status === 200) {
-            const offPayload = await resOff.json();
-            const products = offPayload.products || [];
-            
-            for (const prod of products) {
-              const nutriments = prod.nutriments || {};
-              const kcal = Number(nutriments['energy-kcal_100g']) || 0;
-              const protein = Number(nutriments.proteins_100g) || 0;
-              const fat = Number(nutriments.fat_100g) || 0;
-              const carb = Number(nutriments.carbohydrates_100g) || 0;
-              const fiber = Number(nutriments.fiber_100g) || 0;
+          if (resOff.status !== 200) {
+            const errText = await resOff.text();
+            throw new Error(`Open Food Facts API returned status ${resOff.status}: ${errText}`);
+          }
+          const offPayload = await resOff.json();
+          const products = offPayload.products || [];
+          
+          for (const prod of products) {
+            const nutriments = prod.nutriments || {};
+            const kcal = Number(nutriments['energy-kcal_100g']) || 0;
+            const protein = Number(nutriments.proteins_100g) || 0;
+            const fat = Number(nutriments.fat_100g) || 0;
+            const carb = Number(nutriments.carbohydrates_100g) || 0;
+            const fiber = Number(nutriments.fiber_100g) || 0;
 
-              const foodName = prod.product_name || 'Unknown Branded Food';
-              const foodBrand = prod.brands || 'Generic';
-              const sourceIdStr = prod.code || Math.random().toString(36).substring(7);
+            const foodName = prod.product_name || 'Unknown Branded Food';
+            const foodBrand = prod.brands || 'Generic';
+            const sourceIdStr = prod.code || Math.random().toString(36).substring(7);
 
-              // Check if it already exists locally
-              const existing = await db
-                .select()
-                .from(foods)
-                .where(and(eq(foods.source, 'off'), eq(foods.sourceId, sourceIdStr)))
-                .limit(1);
+            // Check if it already exists locally
+            const existing = await db
+              .select()
+              .from(foods)
+              .where(and(eq(foods.source, 'off'), eq(foods.sourceId, sourceIdStr)))
+              .limit(1);
 
-              let targetFood;
-              if (existing.length > 0) {
-                targetFood = existing[0];
-              } else {
-                const [inserted] = await db.insert(foods).values({
-                  source: 'off',
-                  sourceId: sourceIdStr,
-                  barcode: prod.code || null,
-                  name: foodName,
-                  brand: foodBrand,
-                  kcalPer100g: sql`${kcal}::numeric`,
-                  proteinPer100g: sql`${protein}::numeric`,
-                  fatPer100g: sql`${fat}::numeric`,
-                  carbPer100g: sql`${carb}::numeric`,
-                  fiberPer100g: sql`${fiber}::numeric`,
-                  searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
-                }).returning();
+            let targetFood;
+            if (existing.length > 0) {
+              targetFood = existing[0];
+            } else {
+              const [inserted] = await db.insert(foods).values({
+                source: 'off',
+                sourceId: sourceIdStr,
+                barcode: prod.code || null,
+                name: foodName,
+                brand: foodBrand,
+                kcalPer100g: sql`${kcal}::numeric`,
+                proteinPer100g: sql`${protein}::numeric`,
+                fatPer100g: sql`${fat}::numeric`,
+                carbPer100g: sql`${carb}::numeric`,
+                fiberPer100g: sql`${fiber}::numeric`,
+                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+              }).returning();
 
-                targetFood = inserted;
+              targetFood = inserted;
 
-                const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
-                const netWeightGrams = Number(prod.product_quantity) || 0;
-                if (netWeightGrams > 0) {
-                  servingsList.push({ label: `1 package (${netWeightGrams}g)`, grams: netWeightGrams, isDefault: false });
-                }
-
-                for (const s of servingsList) {
-                  await db.insert(foodServings).values({
-                    foodId: targetFood.id,
-                    label: s.label,
-                    grams: sql`${s.grams}::numeric`,
-                    isDefault: s.isDefault,
-                  }).onConflictDoNothing();
-                }
+              const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
+              const netWeightGrams = Number(prod.product_quantity) || 0;
+              if (netWeightGrams > 0) {
+                servingsList.push({ label: `1 package (${netWeightGrams}g)`, grams: netWeightGrams, isDefault: false });
               }
 
-              // Only append if it's not already in the list
-              if (!foodsList.some(f => f.id === targetFood.id)) {
-                foodsList.push({
-                  id: targetFood.id,
-                  source: targetFood.source,
-                  sourceId: targetFood.sourceId,
-                  barcode: targetFood.barcode,
-                  name: targetFood.name,
-                  brand: targetFood.brand,
-                  kcalPer100g: String(kcal),
-                  proteinPer100g: String(protein),
-                  fatPer100g: String(fat),
-                  carbPer100g: String(carb),
-                  fiberPer100g: String(fiber),
-                  ownerUserId: null,
-                  log_count: 0,
-                  last_logged: '1970-01-01T00:00:00.000Z',
-                });
+              for (const s of servingsList) {
+                await db.insert(foodServings).values({
+                  foodId: targetFood.id,
+                  label: s.label,
+                  grams: sql`${s.grams}::numeric`,
+                  isDefault: s.isDefault,
+                }).onConflictDoNothing();
               }
+            }
+
+            // Only append if it's not already in the list
+            if (!foodsList.some(f => f.id === targetFood.id)) {
+              foodsList.push({
+                id: targetFood.id,
+                source: targetFood.source,
+                sourceId: targetFood.sourceId,
+                barcode: targetFood.barcode,
+                name: targetFood.name,
+                brand: targetFood.brand,
+                kcalPer100g: String(kcal),
+                proteinPer100g: String(protein),
+                fatPer100g: String(fat),
+                carbPer100g: String(carb),
+                fiberPer100g: String(fiber),
+                ownerUserId: null,
+                log_count: 0,
+                last_logged: '1970-01-01T00:00:00.000Z',
+              });
             }
           }
         } catch (err: any) {
