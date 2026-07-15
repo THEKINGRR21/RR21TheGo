@@ -281,12 +281,76 @@ app.get('/api/foods/search', async (c) => {
     let foodsList: any[] = [];
 
     if (barcode) {
-      // Barcode lookup
+      // 1. Search local database first
       foodsList = await db
         .select()
         .from(foods)
         .where(eq(foods.barcode, barcode))
         .limit(10);
+
+      // 2. If not found, query Open Food Facts API in background!
+      if (foodsList.length === 0) {
+        console.log(`[OFF API] Querying product details for barcode: ${barcode}`);
+        try {
+          const resOff = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`);
+          if (resOff.status === 200) {
+            const offPayload = await resOff.json();
+            if (offPayload.status === 1 && offPayload.product) {
+              const prod = offPayload.product;
+              const nutriments = prod.nutriments || {};
+              
+              const kcal = Number(nutriments['energy-kcal_100g']) || 0;
+              const protein = Number(nutriments.proteins_100g) || 0;
+              const fat = Number(nutriments.fat_100g) || 0;
+              const carb = Number(nutriments.carbohydrates_100g) || 0;
+              const fiber = Number(nutriments.fiber_100g) || 0;
+              
+              const foodId = `food_off_${prod.code || barcode}`;
+              const foodName = prod.product_name || 'Unknown Branded Food';
+              const foodBrand = prod.brands || 'Generic';
+
+              console.log(`[OFF API] Found product: ${foodName} by ${foodBrand}`);
+
+              // Insert food record
+              const inserted = await db.insert(foods).values({
+                id: foodId,
+                source: 'off',
+                sourceId: prod.code || barcode,
+                barcode,
+                name: foodName,
+                brand: foodBrand,
+                kcalPer100g: sql`${kcal}::numeric`,
+                proteinPer100g: sql`${protein}::numeric`,
+                fatPer100g: sql`${fat}::numeric`,
+                carbPer100g: sql`${carb}::numeric`,
+                fiberPer100g: sql`${fiber}::numeric`,
+                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+              }).onConflictDoNothing().returning();
+
+              // Add default servings (100g + 1 serving if packing weight exists)
+              const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
+              const netWeightGrams = Number(prod.product_quantity) || 0;
+              if (netWeightGrams > 0) {
+                servingsList.push({ label: `1 package (${netWeightGrams}g)`, grams: netWeightGrams, isDefault: false });
+              }
+
+              for (const s of servingsList) {
+                await db.insert(foodServings).values({
+                  foodId: inserted[0]?.id || foodId,
+                  label: s.label,
+                  grams: sql`${s.grams}::numeric`,
+                  isDefault: s.isDefault,
+                }).onConflictDoNothing();
+              }
+
+              // Query newly inserted food so it matches local format
+              foodsList = await db.select().from(foods).where(eq(foods.id, inserted[0]?.id || foodId));
+            }
+          }
+        } catch (err) {
+          console.error('Failed to resolve barcode from Open Food Facts API:', err);
+        }
+      }
     } else if (q) {
       // Text search: ranked by personal count desc, then recency desc, then alphabetical
       const searchLike = `%${q}%`;
@@ -323,6 +387,86 @@ app.get('/api/foods/search', async (c) => {
         limit 25
       `);
       foodsList = result.rows || [];
+
+      // 2. If fewer than 5 results are found locally, fetch from Open Food Facts search API!
+      if (foodsList.length < 5) {
+        console.log(`[OFF API] Querying search terms for text: "${q}"`);
+        try {
+          const encodedQuery = encodeURIComponent(q);
+          const resOff = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodedQuery}&search_simple=1&action=process&json=1&page_size=10`);
+          if (resOff.status === 200) {
+            const offPayload = await resOff.json();
+            const products = offPayload.products || [];
+            
+            for (const prod of products) {
+              const nutriments = prod.nutriments || {};
+              const kcal = Number(nutriments['energy-kcal_100g']) || 0;
+              const protein = Number(nutriments.proteins_100g) || 0;
+              const fat = Number(nutriments.fat_100g) || 0;
+              const carb = Number(nutriments.carbohydrates_100g) || 0;
+              const fiber = Number(nutriments.fiber_100g) || 0;
+
+              const foodId = `food_off_${prod.code || Math.random().toString(36).substring(7)}`;
+              const foodName = prod.product_name || 'Unknown Branded Food';
+              const foodBrand = prod.brands || 'Generic';
+
+              // Insert into local cache database
+              const inserted = await db.insert(foods).values({
+                id: foodId,
+                source: 'off',
+                sourceId: prod.code || foodId,
+                barcode: prod.code || null,
+                name: foodName,
+                brand: foodBrand,
+                kcalPer100g: sql`${kcal}::numeric`,
+                proteinPer100g: sql`${protein}::numeric`,
+                fatPer100g: sql`${fat}::numeric`,
+                carbPer100g: sql`${carb}::numeric`,
+                fiberPer100g: sql`${fiber}::numeric`,
+                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+              }).onConflictDoNothing().returning();
+
+              if (inserted.length > 0) {
+                // Add default servings
+                const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
+                const netWeightGrams = Number(prod.product_quantity) || 0;
+                if (netWeightGrams > 0) {
+                  servingsList.push({ label: `1 package (${netWeightGrams}g)`, grams: netWeightGrams, isDefault: false });
+                }
+
+                for (const s of servingsList) {
+                  await db.insert(foodServings).values({
+                    foodId: inserted[0].id,
+                    label: s.label,
+                    grams: sql`${s.grams}::numeric`,
+                    isDefault: s.isDefault,
+                  }).onConflictDoNothing();
+                }
+
+                // Append to our search results array
+                foodsList.push({
+                  id: inserted[0].id,
+                  source: 'off',
+                  sourceId: inserted[0].sourceId,
+                  barcode: inserted[0].barcode,
+                  name: inserted[0].name,
+                  brand: inserted[0].brand,
+                  kcalPer100g: String(kcal),
+                  proteinPer100g: String(protein),
+                  fatPer100g: String(fat),
+                  carbPer100g: String(carb),
+                  fiberPer100g: String(fiber),
+                  ownerUserId: null,
+                  log_count: 0,
+                  last_logged: '1970-01-01T00:00:00.000Z',
+                });
+              }
+            }
+          }
+        } catch (err) {
+          console.error('Failed to fetch from Open Food Facts API text search:', err);
+        }
+      }
     } else {
       // Empty query state: return user's recently logged foods
       const result = await db.execute(sql`
