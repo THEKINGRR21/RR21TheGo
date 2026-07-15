@@ -288,11 +288,75 @@ app.get('/api/foods/search', async (c) => {
         .where(eq(foods.barcode, barcode))
         .limit(10);
 
-      // 2. If not found, query Open Food Facts API in background!
+      // 2. Query USDA API by barcode if not found locally
+      if (foodsList.length === 0) {
+        console.log(`[USDA API] Querying product details for barcode: ${barcode}`);
+        try {
+          const resUsda = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?api_key=DEMO_KEY&query=${barcode}&pageSize=1`);
+          if (resUsda.status === 200) {
+            const usdaPayload = await resUsda.json();
+            const products = usdaPayload.foods || [];
+            if (products.length > 0) {
+              const prod = products[0];
+              const kcal = Number(prod.foodNutrients.find((n: any) => n.unitName === 'KCAL' || n.nutrientName.toLowerCase().includes('energy'))?.value) || 0;
+              const protein = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase() === 'protein')?.value) || 0;
+              const fat = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('lipid') || n.nutrientName.toLowerCase() === 'fat')?.value) || 0;
+              const carb = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('carbohydrate'))?.value) || 0;
+              const fiber = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('fiber') || n.nutrientName.toLowerCase().includes('fibre'))?.value) || 0;
+
+              const foodId = `food_usda_${prod.fdcId}`;
+              const foodName = prod.description || 'Unknown Branded Food';
+              const foodBrand = prod.brandName || prod.brandOwner || 'Generic';
+
+              const inserted = await db.insert(foods).values({
+                id: foodId,
+                source: 'usda',
+                sourceId: String(prod.fdcId),
+                barcode,
+                name: foodName,
+                brand: foodBrand,
+                kcalPer100g: sql`${kcal}::numeric`,
+                proteinPer100g: sql`${protein}::numeric`,
+                fatPer100g: sql`${fat}::numeric`,
+                carbPer100g: sql`${carb}::numeric`,
+                fiberPer100g: sql`${fiber}::numeric`,
+                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+              }).onConflictDoNothing().returning();
+
+              // Add default servings
+              const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
+              const servingGrams = Number(prod.servingSize) || 0;
+              if (servingGrams > 0) {
+                const label = prod.householdServingFullText ? `${prod.householdServingFullText} (${servingGrams}g)` : `1 serving (${servingGrams}g)`;
+                servingsList.push({ label, grams: servingGrams, isDefault: false });
+              }
+
+              for (const s of servingsList) {
+                await db.insert(foodServings).values({
+                  foodId: inserted[0]?.id || foodId,
+                  label: s.label,
+                  grams: sql`${s.grams}::numeric`,
+                  isDefault: s.isDefault,
+                }).onConflictDoNothing();
+              }
+
+              foodsList = await db.select().from(foods).where(eq(foods.id, inserted[0]?.id || foodId));
+            }
+          }
+        } catch (err) {
+          console.error('Failed to resolve barcode from USDA API:', err);
+        }
+      }
+
+      // 3. Fallback to Open Food Facts API (with headers) if still not found
       if (foodsList.length === 0) {
         console.log(`[OFF API] Querying product details for barcode: ${barcode}`);
         try {
-          const resOff = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`);
+          const resOff = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`, {
+            headers: {
+              'User-Agent': 'GoTracker/1.0 (rishiraman212005@gmail.com)'
+            }
+          });
           if (resOff.status === 200) {
             const offPayload = await resOff.json();
             if (offPayload.status === 1 && offPayload.product) {
@@ -309,9 +373,6 @@ app.get('/api/foods/search', async (c) => {
               const foodName = prod.product_name || 'Unknown Branded Food';
               const foodBrand = prod.brands || 'Generic';
 
-              console.log(`[OFF API] Found product: ${foodName} by ${foodBrand}`);
-
-              // Insert food record
               const inserted = await db.insert(foods).values({
                 id: foodId,
                 source: 'off',
@@ -327,7 +388,6 @@ app.get('/api/foods/search', async (c) => {
                 searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
               }).onConflictDoNothing().returning();
 
-              // Add default servings (100g + 1 serving if packing weight exists)
               const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
               const netWeightGrams = Number(prod.product_quantity) || 0;
               if (netWeightGrams > 0) {
@@ -343,7 +403,6 @@ app.get('/api/foods/search', async (c) => {
                 }).onConflictDoNothing();
               }
 
-              // Query newly inserted food so it matches local format
               foodsList = await db.select().from(foods).where(eq(foods.id, inserted[0]?.id || foodId));
             }
           }
@@ -388,12 +447,94 @@ app.get('/api/foods/search', async (c) => {
       `);
       foodsList = result.rows || [];
 
-      // 2. If fewer than 5 results are found locally, fetch from Open Food Facts search API!
+      // 2. Query USDA API for text search if fewer than 5 local results
+      if (foodsList.length < 5) {
+        console.log(`[USDA API] Querying search terms for text: "${q}"`);
+        try {
+          const encodedQuery = encodeURIComponent(q);
+          const resUsda = await fetch(`https://api.nal.usda.gov/fdc/v1/foods/search?api_key=DEMO_KEY&query=${encodedQuery}&pageSize=10`);
+          if (resUsda.status === 200) {
+            const usdaPayload = await resUsda.json();
+            const products = usdaPayload.foods || [];
+            
+            for (const prod of products) {
+              const kcal = Number(prod.foodNutrients.find((n: any) => n.unitName === 'KCAL' || n.nutrientName.toLowerCase().includes('energy'))?.value) || 0;
+              const protein = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase() === 'protein')?.value) || 0;
+              const fat = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('lipid') || n.nutrientName.toLowerCase() === 'fat')?.value) || 0;
+              const carb = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('carbohydrate'))?.value) || 0;
+              const fiber = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('fiber') || n.nutrientName.toLowerCase().includes('fibre'))?.value) || 0;
+
+              const foodId = `food_usda_${prod.fdcId}`;
+              const foodName = prod.description || 'Unknown Food';
+              const foodBrand = prod.brandName || prod.brandOwner || 'Generic';
+
+              // Insert into local cache database
+              const inserted = await db.insert(foods).values({
+                id: foodId,
+                source: 'usda',
+                sourceId: String(prod.fdcId),
+                barcode: prod.gtinUpc || null,
+                name: foodName,
+                brand: foodBrand,
+                kcalPer100g: sql`${kcal}::numeric`,
+                proteinPer100g: sql`${protein}::numeric`,
+                fatPer100g: sql`${fat}::numeric`,
+                carbPer100g: sql`${carb}::numeric`,
+                fiberPer100g: sql`${fiber}::numeric`,
+                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+              }).onConflictDoNothing().returning();
+
+              if (inserted.length > 0) {
+                const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
+                const servingGrams = Number(prod.servingSize) || 0;
+                if (servingGrams > 0) {
+                  const label = prod.householdServingFullText ? `${prod.householdServingFullText} (${servingGrams}g)` : `1 serving (${servingGrams}g)`;
+                  servingsList.push({ label, grams: servingGrams, isDefault: false });
+                }
+
+                for (const s of servingsList) {
+                  await db.insert(foodServings).values({
+                    foodId: inserted[0].id,
+                    label: s.label,
+                    grams: sql`${s.grams}::numeric`,
+                    isDefault: s.isDefault,
+                  }).onConflictDoNothing();
+                }
+
+                foodsList.push({
+                  id: inserted[0].id,
+                  source: 'usda',
+                  sourceId: inserted[0].sourceId,
+                  barcode: inserted[0].barcode,
+                  name: inserted[0].name,
+                  brand: inserted[0].brand,
+                  kcalPer100g: String(kcal),
+                  proteinPer100g: String(protein),
+                  fatPer100g: String(fat),
+                  carbPer100g: String(carb),
+                  fiberPer100g: String(fiber),
+                  ownerUserId: null,
+                  log_count: 0,
+                  last_logged: '1970-01-01T00:00:00.000Z',
+                });
+              }
+            }
+          }
+        } catch (err) {
+          console.error('Failed to fetch from USDA API text search:', err);
+        }
+      }
+
+      // 4. Secondary fallback: Query Open Food Facts if still fewer than 5 results
       if (foodsList.length < 5) {
         console.log(`[OFF API] Querying search terms for text: "${q}"`);
         try {
           const encodedQuery = encodeURIComponent(q);
-          const resOff = await fetch(`https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodedQuery}&search_simple=1&action=process&json=1&page_size=10`);
+          const resOff = await fetch(`https://world.openfoodfacts.org/api/v2/search?search_terms=${encodedQuery}&fields=code,product_name,brands,nutriments,product_quantity&page_size=10`, {
+            headers: {
+              'User-Agent': 'GoTracker/1.0 (rishiraman212005@gmail.com)'
+            }
+          });
           if (resOff.status === 200) {
             const offPayload = await resOff.json();
             const products = offPayload.products || [];
