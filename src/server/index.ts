@@ -304,43 +304,57 @@ app.get('/api/foods/search', async (c) => {
               const carb = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('carbohydrate'))?.value) || 0;
               const fiber = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('fiber') || n.nutrientName.toLowerCase().includes('fibre'))?.value) || 0;
 
-              const foodId = `food_usda_${prod.fdcId}`;
               const foodName = prod.description || 'Unknown Branded Food';
               const foodBrand = prod.brandName || prod.brandOwner || 'Generic';
+              const sourceIdStr = String(prod.fdcId);
 
-              const inserted = await db.insert(foods).values({
-                id: foodId,
-                source: 'usda',
-                sourceId: String(prod.fdcId),
-                barcode,
-                name: foodName,
-                brand: foodBrand,
-                kcalPer100g: sql`${kcal}::numeric`,
-                proteinPer100g: sql`${protein}::numeric`,
-                fatPer100g: sql`${fat}::numeric`,
-                carbPer100g: sql`${carb}::numeric`,
-                fiberPer100g: sql`${fiber}::numeric`,
-                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
-              }).onConflictDoNothing().returning();
+              // Check if it already exists locally
+              const existing = await db
+                .select()
+                .from(foods)
+                .where(and(eq(foods.source, 'usda'), eq(foods.sourceId, sourceIdStr)))
+                .limit(1);
 
-              // Add default servings
-              const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
-              const servingGrams = Number(prod.servingSize) || 0;
-              if (servingGrams > 0) {
-                const label = prod.householdServingFullText ? `${prod.householdServingFullText} (${servingGrams}g)` : `1 serving (${servingGrams}g)`;
-                servingsList.push({ label, grams: servingGrams, isDefault: false });
+              let targetFood;
+              if (existing.length > 0) {
+                targetFood = existing[0];
+              } else {
+                // Insert new row (omit id so Postgres gen_random_uuid works)
+                const [inserted] = await db.insert(foods).values({
+                  source: 'usda',
+                  sourceId: sourceIdStr,
+                  barcode,
+                  name: foodName,
+                  brand: foodBrand,
+                  kcalPer100g: sql`${kcal}::numeric`,
+                  proteinPer100g: sql`${protein}::numeric`,
+                  fatPer100g: sql`${fat}::numeric`,
+                  carbPer100g: sql`${carb}::numeric`,
+                  fiberPer100g: sql`${fiber}::numeric`,
+                  searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+                }).returning();
+
+                targetFood = inserted;
+
+                // Add servings
+                const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
+                const servingGrams = Number(prod.servingSize) || 0;
+                if (servingGrams > 0) {
+                  const label = prod.householdServingFullText ? `${prod.householdServingFullText} (${servingGrams}g)` : `1 serving (${servingGrams}g)`;
+                  servingsList.push({ label, grams: servingGrams, isDefault: false });
+                }
+
+                for (const s of servingsList) {
+                  await db.insert(foodServings).values({
+                    foodId: targetFood.id,
+                    label: s.label,
+                    grams: sql`${s.grams}::numeric`,
+                    isDefault: s.isDefault,
+                  }).onConflictDoNothing();
+                }
               }
 
-              for (const s of servingsList) {
-                await db.insert(foodServings).values({
-                  foodId: inserted[0]?.id || foodId,
-                  label: s.label,
-                  grams: sql`${s.grams}::numeric`,
-                  isDefault: s.isDefault,
-                }).onConflictDoNothing();
-              }
-
-              foodsList = await db.select().from(foods).where(eq(foods.id, inserted[0]?.id || foodId));
+              foodsList = await db.select().from(foods).where(eq(foods.id, targetFood.id));
             }
           }
         } catch (err) {
@@ -369,41 +383,54 @@ app.get('/api/foods/search', async (c) => {
               const carb = Number(nutriments.carbohydrates_100g) || 0;
               const fiber = Number(nutriments.fiber_100g) || 0;
               
-              const foodId = `food_off_${prod.code || barcode}`;
               const foodName = prod.product_name || 'Unknown Branded Food';
               const foodBrand = prod.brands || 'Generic';
+              const sourceIdStr = prod.code || barcode;
 
-              const inserted = await db.insert(foods).values({
-                id: foodId,
-                source: 'off',
-                sourceId: prod.code || barcode,
-                barcode,
-                name: foodName,
-                brand: foodBrand,
-                kcalPer100g: sql`${kcal}::numeric`,
-                proteinPer100g: sql`${protein}::numeric`,
-                fatPer100g: sql`${fat}::numeric`,
-                carbPer100g: sql`${carb}::numeric`,
-                fiberPer100g: sql`${fiber}::numeric`,
-                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
-              }).onConflictDoNothing().returning();
+              // Check if it already exists locally
+              const existing = await db
+                .select()
+                .from(foods)
+                .where(and(eq(foods.source, 'off'), eq(foods.sourceId, sourceIdStr)))
+                .limit(1);
 
-              const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
-              const netWeightGrams = Number(prod.product_quantity) || 0;
-              if (netWeightGrams > 0) {
-                servingsList.push({ label: `1 package (${netWeightGrams}g)`, grams: netWeightGrams, isDefault: false });
+              let targetFood;
+              if (existing.length > 0) {
+                targetFood = existing[0];
+              } else {
+                const [inserted] = await db.insert(foods).values({
+                  source: 'off',
+                  sourceId: sourceIdStr,
+                  barcode,
+                  name: foodName,
+                  brand: foodBrand,
+                  kcalPer100g: sql`${kcal}::numeric`,
+                  proteinPer100g: sql`${protein}::numeric`,
+                  fatPer100g: sql`${fat}::numeric`,
+                  carbPer100g: sql`${carb}::numeric`,
+                  fiberPer100g: sql`${fiber}::numeric`,
+                  searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+                }).returning();
+
+                targetFood = inserted;
+
+                const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
+                const netWeightGrams = Number(prod.product_quantity) || 0;
+                if (netWeightGrams > 0) {
+                  servingsList.push({ label: `1 package (${netWeightGrams}g)`, grams: netWeightGrams, isDefault: false });
+                }
+
+                for (const s of servingsList) {
+                  await db.insert(foodServings).values({
+                    foodId: targetFood.id,
+                    label: s.label,
+                    grams: sql`${s.grams}::numeric`,
+                    isDefault: s.isDefault,
+                  }).onConflictDoNothing();
+                }
               }
 
-              for (const s of servingsList) {
-                await db.insert(foodServings).values({
-                  foodId: inserted[0]?.id || foodId,
-                  label: s.label,
-                  grams: sql`${s.grams}::numeric`,
-                  isDefault: s.isDefault,
-                }).onConflictDoNothing();
-              }
-
-              foodsList = await db.select().from(foods).where(eq(foods.id, inserted[0]?.id || foodId));
+              foodsList = await db.select().from(foods).where(eq(foods.id, targetFood.id));
             }
           }
         } catch (err) {
@@ -464,27 +491,37 @@ app.get('/api/foods/search', async (c) => {
               const carb = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('carbohydrate'))?.value) || 0;
               const fiber = Number(prod.foodNutrients.find((n: any) => n.nutrientName.toLowerCase().includes('fiber') || n.nutrientName.toLowerCase().includes('fibre'))?.value) || 0;
 
-              const foodId = `food_usda_${prod.fdcId}`;
               const foodName = prod.description || 'Unknown Food';
               const foodBrand = prod.brandName || prod.brandOwner || 'Generic';
+              const sourceIdStr = String(prod.fdcId);
 
-              // Insert into local cache database
-              const inserted = await db.insert(foods).values({
-                id: foodId,
-                source: 'usda',
-                sourceId: String(prod.fdcId),
-                barcode: prod.gtinUpc || null,
-                name: foodName,
-                brand: foodBrand,
-                kcalPer100g: sql`${kcal}::numeric`,
-                proteinPer100g: sql`${protein}::numeric`,
-                fatPer100g: sql`${fat}::numeric`,
-                carbPer100g: sql`${carb}::numeric`,
-                fiberPer100g: sql`${fiber}::numeric`,
-                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
-              }).onConflictDoNothing().returning();
+              // Check if it already exists locally
+              const existing = await db
+                .select()
+                .from(foods)
+                .where(and(eq(foods.source, 'usda'), eq(foods.sourceId, sourceIdStr)))
+                .limit(1);
 
-              if (inserted.length > 0) {
+              let targetFood;
+              if (existing.length > 0) {
+                targetFood = existing[0];
+              } else {
+                const [inserted] = await db.insert(foods).values({
+                  source: 'usda',
+                  sourceId: sourceIdStr,
+                  barcode: prod.gtinUpc || null,
+                  name: foodName,
+                  brand: foodBrand,
+                  kcalPer100g: sql`${kcal}::numeric`,
+                  proteinPer100g: sql`${protein}::numeric`,
+                  fatPer100g: sql`${fat}::numeric`,
+                  carbPer100g: sql`${carb}::numeric`,
+                  fiberPer100g: sql`${fiber}::numeric`,
+                  searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+                }).returning();
+
+                targetFood = inserted;
+
                 const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
                 const servingGrams = Number(prod.servingSize) || 0;
                 if (servingGrams > 0) {
@@ -494,20 +531,23 @@ app.get('/api/foods/search', async (c) => {
 
                 for (const s of servingsList) {
                   await db.insert(foodServings).values({
-                    foodId: inserted[0].id,
+                    foodId: targetFood.id,
                     label: s.label,
                     grams: sql`${s.grams}::numeric`,
                     isDefault: s.isDefault,
                   }).onConflictDoNothing();
                 }
+              }
 
+              // Only append if it's not already in the list
+              if (!foodsList.some(f => f.id === targetFood.id)) {
                 foodsList.push({
-                  id: inserted[0].id,
-                  source: 'usda',
-                  sourceId: inserted[0].sourceId,
-                  barcode: inserted[0].barcode,
-                  name: inserted[0].name,
-                  brand: inserted[0].brand,
+                  id: targetFood.id,
+                  source: targetFood.source,
+                  sourceId: targetFood.sourceId,
+                  barcode: targetFood.barcode,
+                  name: targetFood.name,
+                  brand: targetFood.brand,
                   kcalPer100g: String(kcal),
                   proteinPer100g: String(protein),
                   fatPer100g: String(fat),
@@ -547,28 +587,37 @@ app.get('/api/foods/search', async (c) => {
               const carb = Number(nutriments.carbohydrates_100g) || 0;
               const fiber = Number(nutriments.fiber_100g) || 0;
 
-              const foodId = `food_off_${prod.code || Math.random().toString(36).substring(7)}`;
               const foodName = prod.product_name || 'Unknown Branded Food';
               const foodBrand = prod.brands || 'Generic';
+              const sourceIdStr = prod.code || Math.random().toString(36).substring(7);
 
-              // Insert into local cache database
-              const inserted = await db.insert(foods).values({
-                id: foodId,
-                source: 'off',
-                sourceId: prod.code || foodId,
-                barcode: prod.code || null,
-                name: foodName,
-                brand: foodBrand,
-                kcalPer100g: sql`${kcal}::numeric`,
-                proteinPer100g: sql`${protein}::numeric`,
-                fatPer100g: sql`${fat}::numeric`,
-                carbPer100g: sql`${carb}::numeric`,
-                fiberPer100g: sql`${fiber}::numeric`,
-                searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
-              }).onConflictDoNothing().returning();
+              // Check if it already exists locally
+              const existing = await db
+                .select()
+                .from(foods)
+                .where(and(eq(foods.source, 'off'), eq(foods.sourceId, sourceIdStr)))
+                .limit(1);
 
-              if (inserted.length > 0) {
-                // Add default servings
+              let targetFood;
+              if (existing.length > 0) {
+                targetFood = existing[0];
+              } else {
+                const [inserted] = await db.insert(foods).values({
+                  source: 'off',
+                  sourceId: sourceIdStr,
+                  barcode: prod.code || null,
+                  name: foodName,
+                  brand: foodBrand,
+                  kcalPer100g: sql`${kcal}::numeric`,
+                  proteinPer100g: sql`${protein}::numeric`,
+                  fatPer100g: sql`${fat}::numeric`,
+                  carbPer100g: sql`${carb}::numeric`,
+                  fiberPer100g: sql`${fiber}::numeric`,
+                  searchVector: sql`to_tsvector('english', ${foodName + ' ' + foodBrand})`,
+                }).returning();
+
+                targetFood = inserted;
+
                 const servingsList = [{ label: '100g', grams: 100, isDefault: true }];
                 const netWeightGrams = Number(prod.product_quantity) || 0;
                 if (netWeightGrams > 0) {
@@ -577,21 +626,23 @@ app.get('/api/foods/search', async (c) => {
 
                 for (const s of servingsList) {
                   await db.insert(foodServings).values({
-                    foodId: inserted[0].id,
+                    foodId: targetFood.id,
                     label: s.label,
                     grams: sql`${s.grams}::numeric`,
                     isDefault: s.isDefault,
                   }).onConflictDoNothing();
                 }
+              }
 
-                // Append to our search results array
+              // Only append if it's not already in the list
+              if (!foodsList.some(f => f.id === targetFood.id)) {
                 foodsList.push({
-                  id: inserted[0].id,
-                  source: 'off',
-                  sourceId: inserted[0].sourceId,
-                  barcode: inserted[0].barcode,
-                  name: inserted[0].name,
-                  brand: inserted[0].brand,
+                  id: targetFood.id,
+                  source: targetFood.source,
+                  sourceId: targetFood.sourceId,
+                  barcode: targetFood.barcode,
+                  name: targetFood.name,
+                  brand: targetFood.brand,
                   kcalPer100g: String(kcal),
                   proteinPer100g: String(protein),
                   fatPer100g: String(fat),
