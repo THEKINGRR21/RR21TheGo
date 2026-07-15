@@ -71,6 +71,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isOnboarded: boolean;
   isLoading: boolean;
+  isInitializing: boolean;
   authSubject: string | null;
   error: string | null;
   loginWithEmail: (email: string) => Promise<void>;
@@ -99,7 +100,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [target, setTarget] = useState<Target | null>(null);
   const [authSubject, setAuthSubject] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   async function fetchProfile(subject: string) {
@@ -140,12 +142,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (storedSubject) {
           setAuthSubject(storedSubject);
           await fetchProfile(storedSubject);
-        } else {
-          setIsLoading(false);
         }
       } catch (err) {
         console.error('Failed to initialize auth:', err);
-        setIsLoading(false);
+      } finally {
+        setIsInitializing(false);
       }
     }
     initAuth();
@@ -278,6 +279,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isAuthenticated,
         isOnboarded,
         isLoading,
+        isInitializing,
         authSubject,
         error,
         loginWithEmail,

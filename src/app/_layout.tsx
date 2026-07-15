@@ -11,9 +11,9 @@ import { color } from '@/theme/tokens';
 SplashScreen.preventAutoHideAsync();
 
 function LayoutContent() {
-  const { isAuthenticated, isOnboarded, isLoading } = useAuth();
+  const { isAuthenticated, isOnboarded, isInitializing } = useAuth();
 
-  if (isLoading) {
+  if (isInitializing) {
     return (
       <View style={{ flex: 1, backgroundColor: color.void, justifyContent: 'center', alignItems: 'center' }}>
         <ActivityIndicator size="large" color={color.signal} />
