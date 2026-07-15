@@ -10,8 +10,6 @@ import { WeightChart } from '@/components/weight-chart';
 import { formatWeight } from '@/utils/units';
 import { TheTick } from '@/components/the-tick';
 import { LocalStore, syncOfflineQueue } from '@/utils/sync';
-import crypto from 'crypto';
-
 const API_BASE = 'https://rr21thego.onrender.com/api';
 
 interface LoggedEntry {
@@ -161,7 +159,7 @@ export default function HomeScreen() {
     try {
       // 1. Create local weight log record
       const localWeight = {
-        id: `weight_${crypto.randomUUID()}`,
+        id: `weight_${Math.random().toString(36).substring(2)}${Date.now()}`,
         date: todayStr,
         weightKg: String(wVal),
         bodyFatPct: bodyFatInput ? String(bodyFatInput) : null,

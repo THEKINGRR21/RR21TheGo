@@ -5,7 +5,6 @@ import { color } from '@/theme/tokens';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { router } from 'expo-router';
-import crypto from 'crypto';
 import { LocalStore, syncOfflineQueue } from '@/utils/sync';
 
 const API_BASE = 'https://rr21thego.onrender.com/api';
@@ -158,12 +157,12 @@ export default function LogScreen() {
         proteinG,
         fatG,
         carbG,
-        clientId: `client_${crypto.randomUUID()}`, // Idempotency key
+        clientId: `client_${Math.random().toString(36).substring(2)}${Date.now()}`, // Idempotency key
       };
 
       // 1. Create a local log record to show immediately
       const localEntry = {
-        id: `entry_${crypto.randomUUID()}`,
+        id: `entry_${Math.random().toString(36).substring(2)}${Date.now()}`,
         foodId: selectedFood.id,
         loggedFor: body.loggedFor,
         meal: body.meal,
