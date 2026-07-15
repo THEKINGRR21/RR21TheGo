@@ -12,7 +12,7 @@ import { TheTick } from '@/components/the-tick';
 import { LocalStore, syncOfflineQueue } from '@/utils/sync';
 import crypto from 'crypto';
 
-const API_BASE = 'http://localhost:3000/api';
+const API_BASE = 'https://rr21thego.onrender.com/api';
 
 interface LoggedEntry {
   id: string;

@@ -3,7 +3,7 @@ const isWeb = typeof window !== 'undefined' && typeof localStorage !== 'undefine
 const QUEUE_KEY = 'rr21go_sync_queue';
 const ENTRIES_KEY = 'rr21go_local_entries';
 const WEIGHTS_KEY = 'rr21go_local_weights';
-const API_BASE = 'http://localhost:3000/api';
+const API_BASE = 'https://rr21thego.onrender.com/api';
 
 export interface QueueItem {
   id: string; // client-generated UUID/idempotency key

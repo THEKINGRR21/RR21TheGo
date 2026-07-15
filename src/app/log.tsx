@@ -8,7 +8,7 @@ import { router } from 'expo-router';
 import crypto from 'crypto';
 import { LocalStore, syncOfflineQueue } from '@/utils/sync';
 
-const API_BASE = 'http://localhost:3000/api';
+const API_BASE = 'https://rr21thego.onrender.com/api';
 
 interface FoodServing {
   id: string;
