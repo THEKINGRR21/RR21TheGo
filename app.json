@@ -45,9 +45,7 @@
       }
     },
     "owner": "rizzzy",
-    "runtimeVersion": {
-      "policy": "sdkVersion"
-    },
+    "runtimeVersion": "exposdk:57.0.0",
     "updates": {
       "url": "https://u.expo.dev/518a6226-356b-4ee4-90b0-b357264d1a06"
     }
