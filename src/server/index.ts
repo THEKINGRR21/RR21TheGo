@@ -6,6 +6,7 @@ import { users, targets, bodyMetrics, foods, foodServings, entries } from '../db
 import { eq, desc, and, sql, inArray } from 'drizzle-orm';
 import { computeTarget } from '../utils/nutrition';
 import { calibrateTDEE } from '../utils/algorithm';
+import { calculateWeightTrends } from '../utils/weight';
 
 const app = new Hono();
 
@@ -859,6 +860,110 @@ app.get('/api/weight/history', async (c) => {
     return c.json(history);
   } catch (err: any) {
     console.error('Error fetching weight history:', err.message);
+    return c.json({ error: err.message }, err.message.includes('Unauthorized') ? 401 : 500);
+  }
+});
+
+// 8.5. Get Coaching Insights
+app.get('/api/coaching/insights', async (c) => {
+  try {
+    const user = await getAuthUser(c);
+
+    // Fetch latest target
+    const latestTarget = await rlsTransaction(user.id, async (tx) => {
+      const rows = await tx
+        .select()
+        .from(targets)
+        .where(eq(targets.userId, user.id))
+        .orderBy(desc(targets.createdAt))
+        .limit(1);
+      return rows[0] || null;
+    });
+
+    if (!latestTarget) {
+      return c.json({ error: 'No target profile found. Please onboard first.' }, 400);
+    }
+
+    // Fetch weight history
+    const weights = await rlsTransaction(user.id, async (tx) => {
+      return await tx
+        .select()
+        .from(bodyMetrics)
+        .where(eq(bodyMetrics.userId, user.id))
+        .orderBy(desc(bodyMetrics.measuredOn));
+    });
+    const weightHistory = weights.map((w: any) => ({
+      date: w.measuredOn,
+      weightKg: Number(w.weightKg),
+    }));
+
+    // Fetch daily food logs
+    const foodLogs = await rlsTransaction(user.id, async (tx) => {
+      const rows = await tx.execute(sql`
+        select logged_for as date, sum(kcal) as "kcalLogged"
+        from entries
+        where user_id = ${user.id}::uuid
+        group by logged_for
+      `);
+      return rows.rows || [];
+    });
+    const foodHistory = foodLogs.map((r: any) => ({
+      date: r.date,
+      kcalLogged: Number(r.kcalLogged),
+    }));
+
+    const bmrKcal = Number(latestTarget.bmrKcal) || 1500;
+    const currentWeightKg = weightHistory[0] ? Number(weightHistory[0].weightKg) : Number(user.heightCm) - 100;
+
+    // Run calibration algorithm (Algorithm M1)
+    const calibration = calibrateTDEE({
+      sex: user.sexAtBirth || 'female',
+      weightHistory,
+      foodHistory,
+      bmrKcal,
+      goal: 'cut', // assume cut goal from registered setup
+      rateWeeklyPct: 0.5,
+      currentWeightKg,
+    });
+
+    // Generate smoothed weight trend
+    const trendPoints = calculateWeightTrends(weightHistory);
+
+    // Calculate weight change over trailing 14 days (or whatever trends we have)
+    let weightChangeKg = 0;
+    let averageLoggedKcal = bmrKcal * 1.55;
+
+    if (trendPoints.length >= 2) {
+      const sortedTrends = [...trendPoints].sort((a, b) => b.date.localeCompare(a.date)); // desc
+      const endTrend = sortedTrends[0].trendKg;
+      const endDate = new Date(sortedTrends[0].date);
+      const startDate = new Date(endDate);
+      startDate.setDate(startDate.getDate() - 13);
+      const startDateStr = startDate.toISOString().split('T')[0];
+      const startTrendPoint = sortedTrends.find(p => p.date <= startDateStr) || sortedTrends[sortedTrends.length - 1];
+      const startTrend = startTrendPoint.trendKg;
+      weightChangeKg = endTrend - startTrend;
+
+      const windowFood = foodHistory.filter((f: { date: string; kcalLogged: number }) => f.date >= startDateStr && f.date <= sortedTrends[0].date);
+      const totalKcal = windowFood.reduce((sum: number, curr: { date: string; kcalLogged: number }) => sum + curr.kcalLogged, 0);
+      averageLoggedKcal = windowFood.length > 0 ? totalKcal / windowFood.length : bmrKcal * 1.55;
+    }
+
+    return c.json({
+      bmrKcal,
+      calibratedTdee: calibration.calibratedTdee,
+      dailyCalorieBudget: calibration.dailyCalorieBudget,
+      basis: calibration.basis,
+      rationale: calibration.rationale,
+      weightChangeKg: Number(weightChangeKg.toFixed(2)),
+      averageLoggedKcal: Math.round(averageLoggedKcal),
+      isClampedToKcalFloor: calibration.isClampedToKcalFloor,
+      isClampedToBmrFloor: calibration.isClampedToBmrFloor,
+      trendPoints: trendPoints.slice(-30), // last 30 points
+      foodHistory: foodHistory.slice(-14), // last 14 days
+    });
+  } catch (err: any) {
+    console.error('Error fetching coaching insights:', err.message);
     return c.json({ error: err.message }, err.message.includes('Unauthorized') ? 401 : 500);
   }
 });
